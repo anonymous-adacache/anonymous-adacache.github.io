@@ -1,0 +1,550 @@
+<html lang="en-GB">
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Adaptive Caching for Faster Video Generation with Diffusion Transformers</title>
+    <meta name="description" content="We accelerate Video DiTs w/o any re-training, by introducing a caching schedule that adaptively-allocates computations dependent on each video generation, and a motion-regularization that controls it based on motion content.">
+    <meta name="referrer" content="no-referrer-when-downgrade">
+    <meta name="robots" content="all">
+    <meta content="en_EN" property="og:locale">
+    <meta content="website" property="og:type">
+
+    <link rel="stylesheet" type="text/css" media="all" href="assets/stylesheets/main_free.css" />
+    <link rel="stylesheet" type="text/css" media="all" href="clarity/clarity.css"/>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.18.1/styles/foundation.min.css">
+    <link href="assets/fontawesome-pro-6.6.0-web/css/all.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/img-comparison-slider@8/dist/styles.css"/>
+    <script defer src="https://cdn.jsdelivr.net/npm/img-comparison-slider@8/dist/index.js"></script>
+    <script type="text/x-mathjax-config">
+        MathJax.Hub.Config({
+            "HTML-CSS": {
+              scale: 95,
+              fonts: ["Gyre-Pagella"],
+              imageFont: null,
+              undefinedFamily: "'Arial Unicode MS', cmbright"
+            },
+            tex2jax: {
+                inlineMath: [ ['$','$'], ["\\(","\\)"] ],
+                processEscapes: true
+              }
+          });
+    </script>
+    <script type="text/javascript"
+    src="https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.1/MathJax.js?config=TeX-AMS-MML_HTMLorMML">
+    </script>
+    <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.5.1/jquery.min.js"></script>
+</head>
+
+<body>
+    <!-- Title Page -->
+    <!-- Dark Theme Example -->
+    <!-- <div class="container blog" id="first-content" style="background-color: #304463;">
+        <div class="blog-title white"> -->
+    <div class="container blog" id="first-content" style="background: linear-gradient(135deg,
+    rgba(179, 198, 239, 0.566) 0%,   /* Martini clear liquid */
+    rgba(179, 198, 239, 0.88) 15%,  /* Light silver hint */
+    rgb(179, 198, 239) 35%,  /* Slightly darker silver */
+    rgba(134, 179, 146, 0.852) 70%,  /* Olive green */
+    rgba(134, 179, 146, 0.589) 100%  /* Lemon twist or vermouth */
+);">
+        <div class="blog-title no-cover">
+            <div class="blog-intro">
+                <div>
+                    <h1 class="title">Adaptive Caching for Faster Video Generation with Diffusion Transformers</h1>
+                    <p class="abstract">
+                        Generating temporally-consistent high-fidelity videos can be computationally expensive, especially over longer temporal spans. More-recent Diffusion Transformers (DiTs)--- despite making significant headway in this context--- have only heightened such challenges as they rely on larger models and heavier attention mechanisms, resulting in slower inference speeds. In this paper, we introduce a <em>training-free</em> method to accelerate video DiTs, termed Adaptive Caching (<em>AdaCache</em>), which is motivated by the fact that <em>"not all videos are created equal"</em>: meaning, some videos require fewer denoising steps to attain a reasonable quality than others. Building on this, we not only cache computations through the diffusion process, but also devise a caching schedule tailored to each video generation, maximizing the quality-latency trade-off. We further introduce a Motion Regularization (<em>MoReg</em>) scheme to utilize video information within <em>AdaCache</em>, essentially controlling the compute allocation based on motion content. Altogether, our plug-and-play contributions grant significant inference speedups without sacrificing the generation quality, across multiple video DiT baselines.
+                    </p>
+                </div>
+
+                <div class="info">
+                    <p>Technical Report</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+
+    <div class="container blog main first" id="blog-main">
+        <h1 >
+            Introduction
+        </h1>
+        <p class='text'>
+            Despite the state-of-the-art performance, DiTs can also be computationally expensive both in terms of memory and computational requirements. This becomes especially critical when applied with a large number of input tokens (<em>e.g.</em> high-resolution long video generation). To tackle these challenges and reduce the footprint of diffusion models, various research directions have emerged such as latent diffusion, step-distillation, caching, architecture-search, token reduction and region-based diffusion. Fewer techniques transfer readily from UNet-based pipelines to DiTs, whereas others often require novel formulations. Hence, DiT acceleration has been under-explored as of yet. Moreover, we note that <em>"not all videos are created equal"</em>. Some videos contain high-frequency textures and significant motion content, whereas others are much simpler (<em>e.g.</em> with homogeneous textures or static regions). Having a diffusion process tailored specifically for each video generation can be beneficial in terms of realizing the best quality-latency trade-off.
+        </p>
+
+        <p class="text">
+            Motivated by the above, we introduce Adaptive Caching (<em>AdaCache</em>) for accelerating video diffusion transformers. This approach requires <em>no training</em> and can seamlessly be integrated into a baseline video DiT at inference, as a plug-and-play component. The core idea of our proposal is to cache residual computations within transformer blocks (<em>e.g.</em> attention or MLP outputs) in a certain diffusion step, and reuse them through a number of subsequent steps, that is dependent on the video being generated. We do this by devising a caching schedule, <em>i.e.</em>, deciding when-to-recompute-next whenever making a residual computation. This decision is guided by a distance metric that measures the rate-of-change between previously-stored and current representations. If the distance is high we would not cache for an extended period (<em>i.e.</em>, #steps), to avoid reusing incompatible representations. We further introduce a Motion Regularization (<em>MoReg</em>) to allocate computations based on the motion content in the video being generated. This is inspired by the observation that high-moving sequences require more diffusion steps to achieve a reasonable quality. Altogether, our pipeline is applied on top of multiple video DiT baselines showing much-faster inference speeds without sacrificing generation quality.
+        </p>
+    </div>
+
+    <div class="container blog main gray">
+        <img src="clarity/images/adacache.png">
+        <p class="caption">
+            Overview of Adaptive Caching: (Left) During the diffusion process, we choose to cache residual computations within selected DiT blocks. The caching schedule is <em>content-dependent</em>, as we decide when to compute the next representation based on a distance metric (<em>c<sub>t</sub></em>). This metric measures the rate-of-change from previously-computed (and, stored) representation to the current one, and can be evaluated per-layer or the DiT as a whole. Each computed residual can be cached and reused across multiple steps. (Right) We only cache the residuals (<em>i.e.</em>, skip-connections) which amount to the actual computations (<em>e.g.</em> spatial-temporal/cross attention, MLP). The iteratively denoised representation (<em>i.e.</em>, <em>f<sub>t+k</sub></em> , <em>f<sub>t</sub></em>) always gets updated either with computed or cached residuals.
+        </p>
+    </div>
+
+    <div class="container blog main">
+        <h1>Evaluation</h1>
+
+        <h2>Qualitative results</h2>
+        <p class="text">
+            <em>AdaCache</em> shows a comparable generation quality, while being much-faster at inference. In fact, at extreme caching rates, it can achieve upto 4.49$\times$ speedup on-average (vs. 1.26$\times$ in Pyramid Attention Broadcast) on Open-Sora baseline for 720p-2s video generations. In most cases our generations are aligned well with the baseline in the pixel-space. Yet this is not a strict requirement, as the denoising process can deviate from that of the baseline, especially at higher caching rates. Still, AdaCache is faithful to the text prompt and is not affected by significant artifacts. A few qualitative examples from Open-Sora + <em>AdaCache</em> is shown below.
+        </p>
+    </div>
+
+    
+    <ul class="dots" id="slide-menu-slow"></ul>
+    <div class="container blog max gray">
+        <div class="slideshow">
+            <div class="navigation">
+                <a class="button icon" id="prev_btn"><i class="fa-solid fa-left" ></i></a>
+                <a class="button icon" id="next_btn"><i class="fa-solid fa-right"></i></a>
+            </div>
+            <div class="slider">
+                <div class="slider-item">
+                    <video loop playsinline muted autoplay src="clarity/vids/qual/sample_0000.mp4"></video>
+                    <video loop playsinline muted autoplay src="clarity/vids/qual/sample_0001.mp4"></video>
+                </div>
+                <div class="slider-item">
+                    <video loop playsinline muted autoplay src="clarity/vids/qual/sample_0002.mp4"></video>
+                    <video loop playsinline muted autoplay src="clarity/vids/qual/sample_0003.mp4"></video>
+                </div>
+                <div class="slider-item">
+                    <video loop playsinline muted autoplay src="clarity/vids/qual/sample_0004.mp4"></video>
+                    <video loop playsinline muted autoplay src="clarity/vids/qual/sample_0005.mp4"></video>
+                </div>
+                <div class="slider-item">
+                    <video loop playsinline muted autoplay src="clarity/vids/qual/sample_0006.mp4"></video>
+                    <video loop playsinline muted autoplay src="clarity/vids/qual/sample_0007.mp4"></video>
+                </div>
+                <div class="slider-item">
+                    <video loop playsinline muted autoplay src="clarity/vids/qual/sample_0010.mp4"></video>
+                    <video loop playsinline muted autoplay src="clarity/vids/qual/sample_0011.mp4"></video>
+                </div>
+                <div class="slider-item">
+                    <video loop playsinline muted autoplay src="clarity/vids/qual/sample_0012.mp4"></video>
+                    <video loop playsinline muted autoplay src="clarity/vids/qual/sample_0013.mp4"></video>
+                </div>
+                <div class="slider-item">
+                    <video loop playsinline muted autoplay src="clarity/vids/qual/sample_0014.mp4"></video>
+                    <video loop playsinline muted autoplay src="clarity/vids/qual/sample_0015.mp4"></video>
+                </div>
+                <div class="slider-item">
+                    <video loop playsinline muted autoplay src="clarity/vids/qual/sample_0016.mp4"></video>
+                    <video loop playsinline muted autoplay src="clarity/vids/qual/sample_0017.mp4"></video>
+                </div>
+                <div class="slider-item">
+                    <video loop playsinline muted autoplay src="clarity/vids/qual/sample_0018.mp4"></video>
+                    <video loop playsinline muted autoplay src="clarity/vids/qual/sample_0019.mp4"></video>
+                </div>
+                <div class="slider-item">
+                    <video loop playsinline muted autoplay src="clarity/vids/qual/sample_0020.mp4"></video>
+                    <video loop playsinline muted autoplay src="clarity/vids/qual/sample_0021.mp4"></video>
+                </div>
+                <div class="slider-item">
+                    <video loop playsinline muted autoplay src="clarity/vids/qual/sample_0022.mp4"></video>
+                    <video loop playsinline muted autoplay src="clarity/vids/qual/sample_0023.mp4"></video>
+                </div>
+                <div class="slider-item">
+                    <video loop playsinline muted autoplay src="clarity/vids/qual/sample_0009.mp4"></video>
+                    <video loop playsinline muted autoplay src="clarity/vids/qual/sample_0025.mp4"></video>
+                </div>
+                <div class="slider-item">
+                    <video loop playsinline muted autoplay src="clarity/vids/qual/sample_0026.mp4"></video>
+                    <video loop playsinline muted autoplay src="clarity/vids/qual/sample_0027.mp4"></video>
+                </div>
+                <div class="slider-item">
+                    <video loop playsinline muted autoplay src="clarity/vids/qual/sample_0028.mp4"></video>
+                    <video loop playsinline muted autoplay src="clarity/vids/qual/sample_0029.mp4"></video>
+                </div>
+                <div class="slider-item">
+                    <video loop playsinline muted autoplay src="clarity/vids/qual/sample_0030.mp4"></video>
+                    <video loop playsinline muted autoplay src="clarity/vids/qual/sample_0031.mp4"></video>
+                </div>
+                <div class="slider-item">
+                    <video loop playsinline muted autoplay src="clarity/vids/qual/sample_0032.mp4"></video>
+                    <video loop playsinline muted autoplay src="clarity/vids/qual/sample_0033.mp4"></video>
+                </div>
+                <div class="slider-item">
+                    <video loop playsinline muted autoplay src="clarity/vids/qual/sample_0034.mp4"></video>
+                    <video loop playsinline muted autoplay src="clarity/vids/qual/sample_0035.mp4"></video>
+                </div>
+                <div class="slider-item">
+                    <video loop playsinline muted autoplay src="clarity/vids/qual/sample_0036.mp4"></video>
+                    <video loop playsinline muted autoplay src="clarity/vids/qual/sample_0037.mp4"></video>
+                </div>
+                <div class="slider-item">
+                    <video loop playsinline muted autoplay src="clarity/vids/qual/sample_0038.mp4"></video>
+                    <video loop playsinline muted autoplay src="clarity/vids/qual/sample_0039.mp4"></video>
+                </div>
+                <div class="slider-item">
+                    <video loop playsinline muted autoplay src="clarity/vids/qual/sample_0040.mp4"></video>
+                    <video loop playsinline muted autoplay src="clarity/vids/qual/sample_0041.mp4"></video>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="container blog main">
+        <h2>Comparison with prior-art</h2>
+        <p class="text">
+            First, we note that <em>AdaCache</em> can achieve significantly-higher reduction rates (<em>i.e.</em>, much-smaller absolute latency) compared to Pyramid Attention Broadcast (PAB). Also, <em>AdaCache</em> is more-stable across the whole latency curve, giving better quality-latency trade-offs. This is evident in both quantitative metrics (refer to the paper) and qualitative results (given below). Here, we compare 720p-2s video generations using Open-Sora, with reasonable speedups on a single A100 GPU: PAB w/ 1.66$\times$ speedup vs. <em>AdaCache</em> w/ 2.61$\times$ speedup.
+        </p>
+    </div>
+
+    <div class="container blog extra-extra-large gray">
+        <div class="columns-3">
+            <p style="text-align:center;">Open-Sora</p>
+            <p style="text-align:center;">+ Pyramid Attention Broadcast</p>
+            <p style="text-align:center;">+ <em>AdaCache</em> (ours)</p>
+        </div>
+        <div class="columns-3">
+            <p style="text-align:center;">(419.60s/it)</p>
+            <p style="text-align:center;">(252.72s/it, <b>1.66$\times$ speedup</b>)</p>
+            <p style="text-align:center;">(160.69s/it, <b>2.61$\times$ speedup</b>)</p>
+        </div>
+
+        <div class="columns-3">
+            <video loop playsinline muted autoplay src="clarity/vids/comp/baseline/sample_0018.mp4"></video>
+            <video loop playsinline muted autoplay src="clarity/vids/comp/pab/sample_0018.mp4"></video>
+            <video loop playsinline muted autoplay src="clarity/vids/comp/adacache/sample_0018.mp4"></video>
+        </div>
+        <div class="columns-3">
+            <video loop playsinline muted autoplay src="clarity/vids/comp/baseline/sample_0017.mp4"></video>
+            <video loop playsinline muted autoplay src="clarity/vids/comp/pab/sample_0017.mp4"></video>
+            <video loop playsinline muted autoplay src="clarity/vids/comp/adacache/sample_0017.mp4"></video>
+        </div>
+        <div class="columns-3">
+            <video loop playsinline muted autoplay src="clarity/vids/comp/baseline/sample_0016.mp4"></video>
+            <video loop playsinline muted autoplay src="clarity/vids/comp/pab/sample_0016.mp4"></video>
+            <video loop playsinline muted autoplay src="clarity/vids/comp/adacache/sample_0016.mp4"></video>
+        </div>
+        <div class="columns-3">
+            <video loop playsinline muted autoplay src="clarity/vids/comp/baseline/sample_0015.mp4"></video>
+            <video loop playsinline muted autoplay src="clarity/vids/comp/pab/sample_0015.mp4"></video>
+            <video loop playsinline muted autoplay src="clarity/vids/comp/adacache/sample_0015.mp4"></video>
+        </div>
+        <div class="columns-3">
+            <video loop playsinline muted autoplay src="clarity/vids/comp/baseline/sample_0014.mp4"></video>
+            <video loop playsinline muted autoplay src="clarity/vids/comp/pab/sample_0014.mp4"></video>
+            <video loop playsinline muted autoplay src="clarity/vids/comp/adacache/sample_0014.mp4"></video>
+        </div>
+        <div class="columns-3">
+            <video loop playsinline muted autoplay src="clarity/vids/comp/baseline/sample_0013.mp4"></video>
+            <video loop playsinline muted autoplay src="clarity/vids/comp/pab/sample_0013.mp4"></video>
+            <video loop playsinline muted autoplay src="clarity/vids/comp/adacache/sample_0013.mp4"></video>
+        </div>
+        <div class="columns-3">
+            <video loop playsinline muted autoplay src="clarity/vids/comp/baseline/sample_0012.mp4"></video>
+            <video loop playsinline muted autoplay src="clarity/vids/comp/pab/sample_0012.mp4"></video>
+            <video loop playsinline muted autoplay src="clarity/vids/comp/adacache/sample_0012.mp4"></video>
+        </div>
+        <div class="columns-3">
+            <video loop playsinline muted autoplay src="clarity/vids/comp/baseline/sample_0011.mp4"></video>
+            <video loop playsinline muted autoplay src="clarity/vids/comp/pab/sample_0011.mp4"></video>
+            <video loop playsinline muted autoplay src="clarity/vids/comp/adacache/sample_0011.mp4"></video>
+        </div>
+        <div class="columns-3">
+            <video loop playsinline muted autoplay src="clarity/vids/comp/baseline/sample_0010.mp4"></video>
+            <video loop playsinline muted autoplay src="clarity/vids/comp/pab/sample_0010.mp4"></video>
+            <video loop playsinline muted autoplay src="clarity/vids/comp/adacache/sample_0010.mp4"></video>
+        </div>
+        <div class="columns-3">
+            <video loop playsinline muted autoplay src="clarity/vids/comp/baseline/sample_0009.mp4"></video>
+            <video loop playsinline muted autoplay src="clarity/vids/comp/pab/sample_0009.mp4"></video>
+            <video loop playsinline muted autoplay src="clarity/vids/comp/adacache/sample_0009.mp4"></video>
+        </div>
+        <div class="columns-3">
+            <video loop playsinline muted autoplay src="clarity/vids/comp/baseline/sample_0008.mp4"></video>
+            <video loop playsinline muted autoplay src="clarity/vids/comp/pab/sample_0008.mp4"></video>
+            <video loop playsinline muted autoplay src="clarity/vids/comp/adacache/sample_0008.mp4"></video>
+        </div>
+        <div class="columns-3">
+            <video loop playsinline muted autoplay src="clarity/vids/comp/baseline/sample_0007.mp4"></video>
+            <video loop playsinline muted autoplay src="clarity/vids/comp/pab/sample_0007.mp4"></video>
+            <video loop playsinline muted autoplay src="clarity/vids/comp/adacache/sample_0007.mp4"></video>
+        </div>
+        <div class="columns-3">
+            <video loop playsinline muted autoplay src="clarity/vids/comp/baseline/sample_0006.mp4"></video>
+            <video loop playsinline muted autoplay src="clarity/vids/comp/pab/sample_0006.mp4"></video>
+            <video loop playsinline muted autoplay src="clarity/vids/comp/adacache/sample_0006.mp4"></video>
+        </div>
+        <div class="columns-3">
+            <video loop playsinline muted autoplay src="clarity/vids/comp/baseline/sample_0005.mp4"></video>
+            <video loop playsinline muted autoplay src="clarity/vids/comp/pab/sample_0005.mp4"></video>
+            <video loop playsinline muted autoplay src="clarity/vids/comp/adacache/sample_0005.mp4"></video>
+        </div>
+        <div class="columns-3">
+            <video loop playsinline muted autoplay src="clarity/vids/comp/baseline/sample_0004.mp4"></video>
+            <video loop playsinline muted autoplay src="clarity/vids/comp/pab/sample_0004.mp4"></video>
+            <video loop playsinline muted autoplay src="clarity/vids/comp/adacache/sample_0004.mp4"></video>
+        </div>
+        <div class="columns-3">
+            <video loop playsinline muted autoplay src="clarity/vids/comp/baseline/sample_0003.mp4"></video>
+            <video loop playsinline muted autoplay src="clarity/vids/comp/pab/sample_0003.mp4"></video>
+            <video loop playsinline muted autoplay src="clarity/vids/comp/adacache/sample_0003.mp4"></video>
+        </div>
+        <div class="columns-3">
+            <video loop playsinline muted autoplay src="clarity/vids/comp/baseline/sample_0002.mp4"></video>
+            <video loop playsinline muted autoplay src="clarity/vids/comp/pab/sample_0002.mp4"></video>
+            <video loop playsinline muted autoplay src="clarity/vids/comp/adacache/sample_0002.mp4"></video>
+        </div>
+        <div class="columns-3">
+            <video loop playsinline muted autoplay src="clarity/vids/comp/baseline/sample_0001.mp4"></video>
+            <video loop playsinline muted autoplay src="clarity/vids/comp/pab/sample_0001.mp4"></video>
+            <video loop playsinline muted autoplay src="clarity/vids/comp/adacache/sample_0001.mp4"></video>
+        </div>
+        <div class="columns-3">
+            <video loop playsinline muted autoplay src="clarity/vids/comp/baseline/sample_0000.mp4"></video>
+            <video loop playsinline muted autoplay src="clarity/vids/comp/pab/sample_0000.mp4"></video>
+            <video loop playsinline muted autoplay src="clarity/vids/comp/adacache/sample_0000.mp4"></video>
+        </div>
+
+
+    </div>
+
+
+    <div class="container blog main">
+        <h2>Ablation: <em>AdaCache</em> vs. <em>AdaCache</em> (w/ <em>MoReg</em>)</h2>
+        <p class="text">
+            We show a qualitative comparison of <em>AdaCache</em> and <em>AdaCache</em> (w/ <em>MoReg</em>), applied on top of Open-Sora baseline for 720p-2s (100-step) and 480p-2s (30-step) video generations. Here, we consider extreme caching rates. Despite giving a 4.69$\times$ (or, 2.24$\times$) speedup on a single A100 GPU, <em>AdaCache</em> can also introduce some inconsistencies over time (<em>e.g.</em> artifacts, motion, color). <em>Motion Regularization</em> helps avoid most of them by allocating more computations proportional to the amount of motion, still giving a 4.49$\times$ (or, 2.10$\times$) speedup.
+        </p>
+    </div>
+
+    <div class="container blog extra-extra-large gray">
+        <div class="slide-menu nvs">
+            <ul class="dots" id="slide-menu-nvs">
+                <li class="dot active"></li>
+                <li class="dot"></li>
+                <li class="dot"></li>
+                <li class="dot"></li>
+                <li class="dot"></li>
+                <li class="dot"></li>
+                <li class="dot"></li>
+                <li class="dot"></li>
+                <li class="dot"></li>
+                <li class="dot"></li>
+                <li class="dot"></li>
+            </ul>
+        </div>
+        <div class="columns-3">
+            <p style="text-align:center;">Open-Sora [720p-2s]</p>
+            <p style="text-align:center;">+ <em>AdaCache</em></p>
+            <p style="text-align:center;">+ <em>AdaCache</em> (w/ <em>MoReg</em>)</p>
+        </div>
+        <div class="columns-3">
+            <p style="text-align:center;">(419.60s/it)</p>
+            <p style="text-align:center;">(89.53s/it, <b>4.69$\times$ speedup</b>)</p>
+            <p style="text-align:center;">(93.50s/it, <b>4.49$\times$ speedup</b>)</p>
+        </div>
+        <div class="slide-content-nvs", style="display: block;">
+            <div class="columns-3">
+                <video loop playsinline muted autoplay src="clarity/vids/abl-720p/baseline/sample_0000.mp4"></video>
+                <video loop playsinline muted autoplay src="clarity/vids/abl-720p/adacache/sample_0000.mp4"></video>
+                <video loop playsinline muted autoplay src="clarity/vids/abl-720p/moreg/sample_0000.mp4"></video>
+            </div>
+        </div>
+        <div class="slide-content-nvs", style="display: none;">
+            <div class="columns-3">
+                <video loop playsinline muted autoplay src="clarity/vids/abl-720p/baseline/sample_0001.mp4"></video>
+                <video loop playsinline muted autoplay src="clarity/vids/abl-720p/adacache/sample_0001.mp4"></video>
+                <video loop playsinline muted autoplay src="clarity/vids/abl-720p/moreg/sample_0001.mp4"></video>
+            </div>
+        </div>
+        <div class="slide-content-nvs", style="display: none;">
+            <div class="columns-3">
+                <video loop playsinline muted autoplay src="clarity/vids/abl-720p/baseline/sample_0002.mp4"></video>
+                <video loop playsinline muted autoplay src="clarity/vids/abl-720p/adacache/sample_0002.mp4"></video>
+                <video loop playsinline muted autoplay src="clarity/vids/abl-720p/moreg/sample_0002.mp4"></video>
+            </div>
+        </div>
+        <div class="slide-content-nvs", style="display: none;">
+            <div class="columns-3">
+                <video loop playsinline muted autoplay src="clarity/vids/abl-720p/baseline/sample_0003.mp4"></video>
+                <video loop playsinline muted autoplay src="clarity/vids/abl-720p/adacache/sample_0003.mp4"></video>
+                <video loop playsinline muted autoplay src="clarity/vids/abl-720p/moreg/sample_0003.mp4"></video>
+            </div>
+        </div>
+        <div class="slide-content-nvs", style="display: none;">
+            <div class="columns-3">
+                <video loop playsinline muted autoplay src="clarity/vids/abl-720p/baseline/sample_0004.mp4"></video>
+                <video loop playsinline muted autoplay src="clarity/vids/abl-720p/adacache/sample_0004.mp4"></video>
+                <video loop playsinline muted autoplay src="clarity/vids/abl-720p/moreg/sample_0004.mp4"></video>
+            </div>
+        </div>
+        <div class="slide-content-nvs", style="display: none;">
+            <div class="columns-3">
+                <video loop playsinline muted autoplay src="clarity/vids/abl-720p/baseline/sample_0005.mp4"></video>
+                <video loop playsinline muted autoplay src="clarity/vids/abl-720p/adacache/sample_0005.mp4"></video>
+                <video loop playsinline muted autoplay src="clarity/vids/abl-720p/moreg/sample_0005.mp4"></video>
+            </div>
+        </div>
+        <div class="slide-content-nvs", style="display: none;">
+            <div class="columns-3">
+                <video loop playsinline muted autoplay src="clarity/vids/abl-720p/baseline/sample_0006.mp4"></video>
+                <video loop playsinline muted autoplay src="clarity/vids/abl-720p/adacache/sample_0006.mp4"></video>
+                <video loop playsinline muted autoplay src="clarity/vids/abl-720p/moreg/sample_0006.mp4"></video>
+            </div>
+        </div>
+        <div class="slide-content-nvs", style="display: none;">
+            <div class="columns-3">
+                <video loop playsinline muted autoplay src="clarity/vids/abl-720p/baseline/sample_0007.mp4"></video>
+                <video loop playsinline muted autoplay src="clarity/vids/abl-720p/adacache/sample_0007.mp4"></video>
+                <video loop playsinline muted autoplay src="clarity/vids/abl-720p/moreg/sample_0007.mp4"></video>
+            </div>
+        </div>
+        <div class="slide-content-nvs", style="display: none;">
+            <div class="columns-3">
+                <video loop playsinline muted autoplay src="clarity/vids/abl-720p/baseline/sample_0008.mp4"></video>
+                <video loop playsinline muted autoplay src="clarity/vids/abl-720p/adacache/sample_0008.mp4"></video>
+                <video loop playsinline muted autoplay src="clarity/vids/abl-720p/moreg/sample_0008.mp4"></video>
+            </div>
+        </div>
+        <div class="slide-content-nvs", style="display: none;">
+            <div class="columns-3">
+                <video loop playsinline muted autoplay src="clarity/vids/abl-720p/baseline/sample_0009.mp4"></video>
+                <video loop playsinline muted autoplay src="clarity/vids/abl-720p/adacache/sample_0009.mp4"></video>
+                <video loop playsinline muted autoplay src="clarity/vids/abl-720p/moreg/sample_0009.mp4"></video>
+            </div>
+        </div>
+        <div class="slide-content-nvs", style="display: none;">
+            <div class="columns-3">
+                <video loop playsinline muted autoplay src="clarity/vids/abl-720p/baseline/sample_0010.mp4"></video>
+                <video loop playsinline muted autoplay src="clarity/vids/abl-720p/adacache/sample_0010.mp4"></video>
+                <video loop playsinline muted autoplay src="clarity/vids/abl-720p/moreg/sample_0010.mp4"></video>
+            </div>
+        </div>
+    </div>
+
+    <div class="container blog extra-extra-large gray">
+        <div class="slide-menu interpolation">
+            <ul class="dots" id="slide-menu-interpolation">
+                <li class="dot active"></li>
+                <li class="dot"></li>
+                <li class="dot"></li>
+                <li class="dot"></li>
+                <li class="dot"></li>
+                <li class="dot"></li>
+                <li class="dot"></li>
+                <li class="dot"></li>
+                <li class="dot"></li>
+                <li class="dot"></li>
+                <li class="dot"></li>
+                <li class="dot"></li>
+            </ul>
+        </div>
+        <div class="columns-3">
+            <p style="text-align:center;">Open-Sora [480p-2s]</p>
+            <p style="text-align:center;">+ <em>AdaCache</em></p>
+            <p style="text-align:center;">+ <em>AdaCache</em> (w/ <em>MoReg</em>)</p>
+        </div>
+        <div class="columns-3">
+            <p style="text-align:center;">(54.02s/it)</p>
+            <p style="text-align:center;">(24.16s/it, <b>2.24$\times$ speedup</b>)</p>
+            <p style="text-align:center;">(25.71s/it, <b>2.10$\times$ speedup</b>)</p>
+        </div>
+
+        <div class="slide-content-interpolation", style="display: block;">
+            <div class="columns-3">
+                <video loop playsinline muted autoplay src="clarity/vids/abl-480p/baseline/006.mp4"></video>
+                <video loop playsinline muted autoplay src="clarity/vids/abl-480p/adacache/006.mp4"></video>
+                <video loop playsinline muted autoplay src="clarity/vids/abl-480p/moreg/006.mp4"></video>
+            </div>
+        </div>
+        <div class="slide-content-interpolation", style="display: none;">
+            <div class="columns-3">
+                <video loop playsinline muted autoplay src="clarity/vids/abl-480p/baseline/004.mp4"></video>
+                <video loop playsinline muted autoplay src="clarity/vids/abl-480p/adacache/004.mp4"></video>
+                <video loop playsinline muted autoplay src="clarity/vids/abl-480p/moreg/004.mp4"></video>
+            </div>
+        </div>
+        <div class="slide-content-interpolation", style="display: none;">
+            <div class="columns-3">
+                <video loop playsinline muted autoplay src="clarity/vids/abl-480p/baseline/012.mp4"></video>
+                <video loop playsinline muted autoplay src="clarity/vids/abl-480p/adacache/012.mp4"></video>
+                <video loop playsinline muted autoplay src="clarity/vids/abl-480p/moreg/012.mp4"></video>
+            </div>
+        </div>
+        <div class="slide-content-interpolation", style="display: none;">
+            <div class="columns-3">
+                <video loop playsinline muted autoplay src="clarity/vids/abl-480p/baseline/001.mp4"></video>
+                <video loop playsinline muted autoplay src="clarity/vids/abl-480p/adacache/001.mp4"></video>
+                <video loop playsinline muted autoplay src="clarity/vids/abl-480p/moreg/001.mp4"></video>
+            </div>
+        </div>
+        <div class="slide-content-interpolation", style="display: none;">
+            <div class="columns-3">
+                <video loop playsinline muted autoplay src="clarity/vids/abl-480p/baseline/002.mp4"></video>
+                <video loop playsinline muted autoplay src="clarity/vids/abl-480p/adacache/002.mp4"></video>
+                <video loop playsinline muted autoplay src="clarity/vids/abl-480p/moreg/002.mp4"></video>
+            </div>
+        </div>
+        <div class="slide-content-interpolation", style="display: none;">
+            <div class="columns-3">
+                <video loop playsinline muted autoplay src="clarity/vids/abl-480p/baseline/003.mp4"></video>
+                <video loop playsinline muted autoplay src="clarity/vids/abl-480p/adacache/003.mp4"></video>
+                <video loop playsinline muted autoplay src="clarity/vids/abl-480p/moreg/003.mp4"></video>
+            </div>
+        </div>
+        <div class="slide-content-interpolation", style="display: none;">
+            <div class="columns-3">
+                <video loop playsinline muted autoplay src="clarity/vids/abl-480p/baseline/005.mp4"></video>
+                <video loop playsinline muted autoplay src="clarity/vids/abl-480p/adacache/005.mp4"></video>
+                <video loop playsinline muted autoplay src="clarity/vids/abl-480p/moreg/005.mp4"></video>
+            </div>
+        </div>
+        <div class="slide-content-interpolation", style="display: none;">
+            <div class="columns-3">
+                <video loop playsinline muted autoplay src="clarity/vids/abl-480p/baseline/007.mp4"></video>
+                <video loop playsinline muted autoplay src="clarity/vids/abl-480p/adacache/007.mp4"></video>
+                <video loop playsinline muted autoplay src="clarity/vids/abl-480p/moreg/007.mp4"></video>
+            </div>
+        </div>
+        <div class="slide-content-interpolation", style="display: none;">
+            <div class="columns-3">
+                <video loop playsinline muted autoplay src="clarity/vids/abl-480p/baseline/008.mp4"></video>
+                <video loop playsinline muted autoplay src="clarity/vids/abl-480p/adacache/008.mp4"></video>
+                <video loop playsinline muted autoplay src="clarity/vids/abl-480p/moreg/008.mp4"></video>
+            </div>
+        </div>
+        <div class="slide-content-interpolation", style="display: none;">
+            <div class="columns-3">
+                <video loop playsinline muted autoplay src="clarity/vids/abl-480p/baseline/009.mp4"></video>
+                <video loop playsinline muted autoplay src="clarity/vids/abl-480p/adacache/009.mp4"></video>
+                <video loop playsinline muted autoplay src="clarity/vids/abl-480p/moreg/009.mp4"></video>
+            </div>
+        </div>
+        <div class="slide-content-interpolation", style="display: none;">
+            <div class="columns-3">
+                <video loop playsinline muted autoplay src="clarity/vids/abl-480p/baseline/010.mp4"></video>
+                <video loop playsinline muted autoplay src="clarity/vids/abl-480p/adacache/010.mp4"></video>
+                <video loop playsinline muted autoplay src="clarity/vids/abl-480p/moreg/010.mp4"></video>
+            </div>
+        </div>
+        <div class="slide-content-interpolation", style="display: none;">
+            <div class="columns-3">
+                <video loop playsinline muted autoplay src="clarity/vids/abl-480p/baseline/011.mp4"></video>
+                <video loop playsinline muted autoplay src="clarity/vids/abl-480p/adacache/011.mp4"></video>
+                <video loop playsinline muted autoplay src="clarity/vids/abl-480p/moreg/011.mp4"></video>
+            </div>
+        </div>
+    </div>
+
+
+
+
+    <div class="container blog main">
+        <h1>Conclusion</h1>
+        <p class="text">
+            In this paper, we introduced Adaptive Caching (<em>AdaCache</em>), a plug-and-play component that improves the the inference speed of video generation pipelines based on diffusion transformers, without needing any re-training. It caches residual computations, while also devising the caching schedule dependent on each video generation. We further proposed a Motion Regularization (<em>MoReg</em>) to utilize video information and allocate computations based on motion content, improving the quality-latency trade-off. We apply our contributions on multiple open-source video DiTs, showing comparable generation quality at a fraction of latency. We believe AdaCache is widely-applicable with minimal effort, helping democratize high-fidelity long video generation.
+        </p>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.18.1/highlight.min.js"></script>
+    <script>hljs.initHighlightingOnLoad();</script>
+    <script src="clarity/clarity.js"></script>
+    <script src="assets/scripts/main.js"></script>
+    </html>
+</body>
